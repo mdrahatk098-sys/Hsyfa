@@ -22,31 +22,36 @@ db_lock = threading.Lock()
 # Create tables
 def init_db():
     with db_lock:
+        # Drop old tables if they exist (for clean migration)
+        cursor.execute("DROP TABLE IF EXISTS numbers_upload")
+        cursor.execute("DROP TABLE IF EXISTS services")
+        cursor.execute("DROP TABLE IF EXISTS countries")
+        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS countries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            country TEXT UNIQUE,
-            numbers TEXT DEFAULT ''
+            country TEXT UNIQUE NOT NULL
         )
         """)
         
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS services (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            service TEXT UNIQUE,
-            numbers TEXT DEFAULT ''
+            service TEXT UNIQUE NOT NULL
         )
         """)
         
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS numbers_upload (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            country_id INTEGER,
-            service_id INTEGER,
-            numbers TEXT,
+            country_id INTEGER NOT NULL,
+            service_id INTEGER NOT NULL,
+            numbers TEXT NOT NULL,
             count INTEGER DEFAULT 0,
             used_count INTEGER DEFAULT 0,
-            UNIQUE(country_id, service_id)
+            UNIQUE(country_id, service_id),
+            FOREIGN KEY(country_id) REFERENCES countries(id),
+            FOREIGN KEY(service_id) REFERENCES services(id)
         )
         """)
         
@@ -196,7 +201,7 @@ def handle(m):
         
         try:
             with db_lock:
-                cursor.execute("INSERT INTO countries (country, numbers) VALUES (?, ?)", (country, ''))
+                cursor.execute("INSERT INTO countries (country) VALUES (?)", (country,))
                 conn.commit()
             bot.send_message(m.chat.id, f"✅ Country Saved: {country}")
         except sqlite3.IntegrityError:
@@ -239,7 +244,7 @@ def handle(m):
         
         try:
             with db_lock:
-                cursor.execute("INSERT INTO services (service, numbers) VALUES (?, ?)", (service, ''))
+                cursor.execute("INSERT INTO services (service) VALUES (?)", (service,))
                 conn.commit()
             bot.send_message(m.chat.id, f"✅ Service Added: {service}")
         except sqlite3.IntegrityError:
