@@ -3,6 +3,7 @@ from telebot import types
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import time
 
 TOKEN = "8721478017:AAHIDuAOV0TRUT7iJTdtxOUF18Zh-wupPwE"
 
@@ -77,6 +78,7 @@ upload_flow_numbers = {}
 get_number_service = {}
 get_number_country = {}
 get_number_current = {}
+number_index = {}
 
 
 # ================= START =================
@@ -393,7 +395,7 @@ def callback(call):
         except Exception as e:
             bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
-    # ---------- GET NUMBER - SELECT COUNTRY & SHOW TABLE ----------
+    # ---------- GET NUMBER - SHOW COUNTRY NUMBERS ----------
     elif call.data.startswith("get_select_country_"):
         try:
             parts = call.data.split("_")
@@ -402,6 +404,7 @@ def callback(call):
             
             get_number_country[uid] = country_id
             get_number_service[uid] = service_id
+            number_index[uid] = 0  # Start from first number
             
             # Get the numbers for this country-service combo
             with db_lock:
@@ -421,91 +424,48 @@ def callback(call):
             country_name, service_name, numbers_str, used_count, total_count = result
             numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
             
-            if not numbers_list or used_count >= len(numbers_list):
-                bot.send_message(call.message.chat.id, "⚠️ All numbers have been used for this country-service combo")
+            if not numbers_list:
+                bot.send_message(call.message.chat.id, "⚠️ No numbers available")
                 return
             
-            # Get next available number
-            available_number = numbers_list[used_count]
+            # Display all numbers with copy buttons
+            text = f"""🌍 <b>{country_name}</b> | ⚙️ <b>{service_name}</b>
+
+📱 <b>Available Numbers ({total_count}):</b>
+⭐ Waiting for OTP:
+"""
             
-            # Store current number
-            get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
-            
-            # Create table view
-            table_text = f"""
-┌─────────────────────────────────┐
-│  🌍 Country: {country_name}
-│  ⚙️ Service: {service_name}
-│  📱 Number: `{available_number}`
-│  📊 Progress: {used_count + 1}/{total_count}
-└─────────────────────────────────┘"""
-            
-            # Button to get number with copy feature
             markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}"))
-            markup.row(
-                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
-                types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
-            )
-            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
             
-            bot.send_message(call.message.chat.id, table_text, reply_markup=markup, parse_mode='Markdown')
+            # Show all numbers (limit to 10 for readability)
+            for idx, num in enumerate(numbers_list[:10], 1):
+                text += f"\n{idx}. <code>{num}</code>"
+                markup.add(types.InlineKeyboardButton(f"📋 Copy {idx}", callback_data=f"copy_number_{idx-1}_{country_id}_{service_id}"))
+            
+            if len(numbers_list) > 10:
+                text += f"\n... and {len(numbers_list) - 10} more"
+            
+            markup.row(
+                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_country_{service_id}"),
+                types.InlineKeyboardButton("⬅️ Back", callback_data="back_to_service_list")
+            )
+            
+            bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode='HTML')
         except Exception as e:
             bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
-    # ---------- COPY NUMBER ----------
+    # ---------- COPY SPECIFIC NUMBER ----------
     elif call.data.startswith("copy_number_"):
         try:
             parts = call.data.split("_")
-            country_id = int(parts[2])
-            service_id = int(parts[3])
+            num_idx = int(parts[2])
+            country_id = int(parts[3])
+            service_id = int(parts[4])
             
-            if uid not in get_number_current:
-                bot.answer_callback_query(call.id, "⚠️ Error")
-                return
-            
-            available_number, _, _, used_count, total_count, _, _ = get_number_current[uid]
-            
-            # Update used count
-            new_used_count = used_count + 1
+            # Get the numbers again
             with db_lock:
                 cursor.execute("""
-                    UPDATE numbers_upload 
-                    SET used_count = ? 
-                    WHERE country_id = ? AND service_id = ?
-                """, (new_used_count, country_id, service_id))
-                conn.commit()
-            
-            # Copy to clipboard message
-            copy_msg = f"""✅ NUMBER COPIED!
-
-📱 Number: `{available_number}`
-
-📊 Progress: {new_used_count}/{total_count}"""
-            
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            markup.add(
-                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
-                types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
-            )
-            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
-            
-            bot.send_message(call.message.chat.id, copy_msg, reply_markup=markup, parse_mode='Markdown')
-            bot.answer_callback_query(call.id, f"✅ {available_number} copied!")
-        except Exception as e:
-            bot.answer_callback_query(call.id, f"Error: {str(e)}")
-    
-    # ---------- CHANGE NUMBER ----------
-    elif call.data.startswith("change_number_"):
-        try:
-            parts = call.data.split("_")
-            country_id = int(parts[2])
-            service_id = int(parts[3])
-            
-            # Get the numbers for this country-service combo
-            with db_lock:
-                cursor.execute("""
-                    SELECT c.country, s.service, n.numbers, n.used_count, n.count
+                    SELECT c.country, s.service, n.numbers, n.count
                     FROM numbers_upload n
                     JOIN countries c ON n.country_id = c.id
                     JOIN services s ON n.service_id = s.id
@@ -514,51 +474,52 @@ def callback(call):
                 result = cursor.fetchone()
             
             if not result:
-                bot.answer_callback_query(call.id, "⚠️ No numbers found")
+                bot.answer_callback_query(call.id, "⚠️ Error")
                 return
             
-            country_name, service_name, numbers_str, used_count, total_count = result
+            country_name, service_name, numbers_str, total_count = result
             numbers_list = [n.strip() for n in numbers_str.split('\n') if n.strip()]
             
-            if used_count >= len(numbers_list):
-                bot.send_message(call.message.chat.id, "⚠️ All numbers have been used!")
+            if num_idx >= len(numbers_list):
+                bot.answer_callback_query(call.id, "⚠️ Invalid number")
                 return
             
-            # Get next available number
-            available_number = numbers_list[used_count]
+            selected_number = numbers_list[num_idx]
             
-            # Store current number
-            get_number_current[uid] = (available_number, country_id, service_id, used_count, total_count, country_name, service_name)
+            # Update used count
+            with db_lock:
+                cursor.execute("""
+                    UPDATE numbers_upload 
+                    SET used_count = used_count + 1
+                    WHERE country_id = ? AND service_id = ?
+                """, (country_id, service_id))
+                conn.commit()
             
-            # Create table view
-            table_text = f"""
-┌─────────────────────────────────┐
-│  🌍 Country: {country_name}
-│  ⚙️ Service: {service_name}
-│  📱 Number: `{available_number}`
-│  📊 Progress: {used_count + 1}/{total_count}
-└─────────────────────────────────┘"""
+            copy_msg = f"""✅ <b>NUMBER COPIED!</b>
+
+🌍 <b>{country_name}</b>
+⚙️ <b>{service_name}</b>
+📱 <code>{selected_number}</code>
+
+⭐ Waiting For OTP:
+"""
             
-            # Button to get number with copy feature
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(types.InlineKeyboardButton("📋 Copy Number", callback_data=f"copy_number_{country_id}_{service_id}"))
-            markup.row(
-                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_number_{country_id}_{service_id}"),
-                types.InlineKeyboardButton("🌍 Change Country", callback_data=f"back_to_country_{service_id}")
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("🔄 Change Number", callback_data=f"change_country_{service_id}"),
+                types.InlineKeyboardButton("⬅️ Back", callback_data="back_to_service_list")
             )
-            markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
             
-            bot.edit_message_text(table_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode='Markdown')
-            bot.answer_callback_query(call.id, "✅ Number changed!")
+            bot.send_message(call.message.chat.id, copy_msg, reply_markup=markup, parse_mode='HTML')
+            bot.answer_callback_query(call.id, f"✅ {selected_number} copied!")
         except Exception as e:
             bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
-    # ---------- BACK TO COUNTRY LIST ----------
-    elif call.data.startswith("back_to_country_"):
+    # ---------- CHANGE COUNTRY ----------
+    elif call.data.startswith("change_country_"):
         try:
             service_id = int(call.data.split("_")[-1])
             
-            # Show countries that have numbers for this service
             with db_lock:
                 cursor.execute("""
                     SELECT DISTINCT c.id, c.country 
@@ -578,7 +539,7 @@ def callback(call):
             
             markup.add(types.InlineKeyboardButton("⬅️ Back to Service List", callback_data="back_to_service_list"))
             
-            bot.edit_message_text("🌍 Select Country:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+            bot.send_message(call.message.chat.id, "🌍 Select Country:", reply_markup=markup)
         except Exception as e:
             bot.answer_callback_query(call.id, f"Error: {str(e)}")
     
